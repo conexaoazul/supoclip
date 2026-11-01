@@ -128,3 +128,54 @@ a port or contact SupoClip, n8n, cloud APIs or Odoo.
 - Durable event/outbox/webhook callbacks, DLQ and n8n retries missing.
 - Real video probe, signed upload bridge, worker and rendering not implemented.
 - MCP tools in BlueOps remain **specification only**, never exposed.
+
+
+## QA media evidence gate — independent upload checks (not wired to HTTP)
+
+`gateway/media_evidence.py` now supplies a separate, explicit-opt-in local
+media attestation function for future private uploaded files. It is **not** called
+from the ASGI routes, so preparing a draft does **not** mean rights or
+duration were independently validated.
+
+- Accept only a verified server-side tenant key and opaque `upload:<id>` reference.
+  The file must live in `<QA_ROOT>/<tenant>/<id>.mp4` under a trusted, private
+  root. Open directory and file descriptors with `O_NOFOLLOW`, reject hard
+  links, nonregular files and anything exceeding 1,000,000,000 bytes.
+- SHA-256 streaming hash is computed from file bytes; it must exactly match an
+  independently approved `RightsApproval.source_sha256` from a **trusted rights
+  system**, also matching tenant, source ref, approver, rights record and validity
+  window. A caller-provided `rights_confirmed=true` is **not** that evidence.
+- The optional explicit `ffprobe_fd` wrapper invokes an approved FFprobe
+  binary with fixed arguments, a previously-opened Linux descriptor,
+  20-second timeout and `file`-only protocol whitelist. It requires a
+  sandboxed no-egress QA execution environment.
+- Reject missing/untrusted probe, non-MP4 headers, duration outside 1–1800 s,
+  claim deviating more than 2 s, multiple video streams, unapproved codecs,
+  unexpected attachments and dimensions exceeding 3840×2160.
+- Compare inode/device/size and nanosecond mtime/ctime before and after the
+  media probe to catch ordinary in-place file changes. Production-level race
+  prevention may require copying to immutable tenant-specific object storage
+  with digest-based retrieval before parsing.
+- The return value is a metadata-only
+  `{source_sha256,size_bytes,duration_seconds,rights_ref,...,execution:"DISABLED"}`
+  observation. **No video processing**, cloud upload, HTTP request, n8n
+  workflow, Odoo write, YouTube download, publication or email occurs.
+
+The checks are useful only when a trusted approval system, a secured media
+ingest/upload ticket and a separately reviewed FFprobe sandbox are present.
+Unit tests use synthetic bytes, an injected fake probe and synthetic approval
+records; a passing test **is not a real media or legal rights audit**.
+
+### Media-to-gateway wiring gate
+
+The signed draft API currently permits `rights_confirmed` and a caller
+duration claim to create metadata drafts; this remains acceptable **only**
+while execution is disabled. Before any live job or remote engine invocation,
+the BlueOps orchestration layer must require a matching independently verified
+media attestation bound to the exact verified tenant, source hash, rights proof
+and one-time job ID. Failing any step must deny job execution.
+
+The user-selected rights record must be checked by human review and a secure
+persisted approval store; do not accept arbitrary `RightsApproval` objects
+constructed from submitted JSON as proof. If files can contain faces/voices,
+review privacy basis, access, retention and cross-tenant isolation.
