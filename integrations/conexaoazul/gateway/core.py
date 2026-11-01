@@ -13,7 +13,7 @@ import re
 import time
 from urllib.parse import parse_qsl, urlsplit
 
-from .state import DuplicateIntentError, GatewayState, QueueFullError
+from .state import ClosedIntentError, DuplicateIntentError, GatewayState, QueueFullError
 
 
 class AuthFailure(ValueError):
@@ -173,7 +173,7 @@ class BlueVideoGateway:
                 clip_length=payload["clip_length"], consent_ref=payload["consent_ref"],
                 now=int(self._clock()), max_pending=3,
             )
-        except (DuplicateIntentError, QueueFullError) as exc:
+        except (ClosedIntentError, DuplicateIntentError, QueueFullError) as exc:
             raise PolicyFailure(str(exc)) from exc
         # No tenant, credentials, rights reference or source URL returned to callers.
         return {"job_id": draft["job_id"], "state": draft["state"],
@@ -186,7 +186,7 @@ class BlueVideoGateway:
             method="GET", path="/v1/drafts", body=body,
         )
         return [{"job_id": d["job_id"], "state": d["state"]}
-                for d in self._state.list_for_tenant(tenant_id)]
+                for d in self._state.list_for_tenant(tenant_id, now=int(self._clock()))]
 
     def get_draft(self, *, key_id, signature, timestamp, nonce, job_id):
         """Read metadata of one tenant-owned draft with path-bound signature."""
@@ -196,10 +196,30 @@ class BlueVideoGateway:
             key_id=key_id, signature=signature, timestamp=timestamp, nonce=nonce,
             method="GET", path="/v1/drafts/" + job_id, body=b"",
         )
-        draft = self._state.get_for_tenant(tenant_id, job_id)
+        draft = self._state.get_for_tenant(tenant_id, job_id, now=int(self._clock()))
         if draft is None:
             return None
         return {"job_id": draft["job_id"], "state": draft["state"],
+                "execution": "DISABLED"}
+
+    def close_draft(self, *, key_id, signature, timestamp, nonce, job_id):
+        """Explicit signed metadata closure, not SupoClip cancel/delete/export.
+
+        On-demand expiry may close the draft first. Missing/foreign IDs yield
+        the same response; future orchestrators must not infer access.
+        """
+        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise PolicyFailure("invalid_job_id")
+        tenant_id = self.authenticate(
+            key_id=key_id, signature=signature, timestamp=timestamp, nonce=nonce,
+            method="POST", path="/v1/drafts/" + job_id + "/close", body=b"",
+        )
+        draft = self._state.close_for_tenant(
+            tenant_id, job_id, now=int(self._clock()),
+        )
+        if draft is None:
+            return None
+        return {"job_id": draft["job_id"], "state": "closed",
                 "execution": "DISABLED"}
 
     @staticmethod
