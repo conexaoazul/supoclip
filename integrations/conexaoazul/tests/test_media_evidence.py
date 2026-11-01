@@ -198,6 +198,38 @@ class SourceEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(EvidenceDenied, "invalid_dimensions"):
             self.attest(probe_fn=huge)
 
+    def test_in_place_file_change_during_probe_denied(self):
+        def mutate(fd):
+            with open(self.file, "r+b") as writable:
+                writable.seek(20)
+                writable.write(b"changed")
+                writable.flush()
+                os.fsync(writable.fileno())
+            return fake_probe(fd)
+        with self.assertRaisesRegex(EvidenceDenied, "media_changed_during_probe"):
+            self.attest(probe_fn=mutate)
+
+    def test_real_probe_helper_requires_explicit_opt_in(self):
+        from gateway.media_evidence import ffprobe_fd
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        value = fake_probe
+        with open(self.file, "rb") as file:
+            with patch("gateway.media_evidence.subprocess.run") as call:
+                call.return_value = SimpleNamespace(
+                    returncode=0, stdout=b'{"format": {"duration": "120.25"}}',
+                    stderr=b"",
+                )
+                result = ffprobe_fd(file.fileno())
+                self.assertEqual(result["format"]["duration"], "120.25")
+                argv = call.call_args.args[0]
+                self.assertEqual(argv[argv.index("-protocol_whitelist") + 1], "file")
+                self.assertIn("/proc/self/fd/" + str(file.fileno()), argv)
+                self.assertEqual(call.call_args.kwargs["pass_fds"], (file.fileno(),))
+                self.assertFalse(call.call_args.kwargs["check"])
+        with self.assertRaises(EvidenceDenied):
+            ffprobe_fd(-1)
+
     def test_probe_error_is_not_approval(self):
         def failed(fd):
             raise EvidenceDenied("media_probe_failed")
