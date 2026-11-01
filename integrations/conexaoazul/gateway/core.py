@@ -85,7 +85,8 @@ def _decode_request(raw):
 
 def normalize_source(source):
     """Syntax preflight only. Runtime DNS, redirects and egress still required."""
-    if not isinstance(source, str) or len(source) > 512:
+    if (not isinstance(source, str) or len(source) > 512 or
+            source != source.strip() or any(ord(ch) < 33 for ch in source)):
         raise PolicyFailure("invalid_source")
     if UPLOAD.fullmatch(source):
         return source
