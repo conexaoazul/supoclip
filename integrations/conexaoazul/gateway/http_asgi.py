@@ -22,6 +22,7 @@ REQUIRED_AUTH = (
 MAX_BODY = 8192
 MAX_HEADERS = 32
 DRAFT_DETAIL = re.compile(r"^/v1/drafts/([0-9a-f]{32})$")
+DRAFT_CLOSE = re.compile(r"^/v1/drafts/([0-9a-f]{32})/close$")
 
 
 def _headers(scope):
@@ -155,6 +156,19 @@ def create_app(gateway):
                     status, response = 404, {"error": "not_found"}
                 else:
                     status, response = 200, result
+            elif method == "POST" and (match := DRAFT_CLOSE.fullmatch(path)):
+                # Closing a metadata draft never calls or cancels SupoClip.
+                # No HTTP request body is permitted; the signature binds to
+                # the exact tenant-owned close path.
+                body = await _read_body(receive)
+                if body:
+                    raise BadEnvelope("close_body_forbidden")
+                principal = _principal(headers)
+                result = gateway.close_draft(**principal, job_id=match.group(1))
+                if result is None:
+                    status, response = 404, {"error": "not_found"}
+                else:
+                    status, response = 200, result
             else:
                 # Never silently expose SupoClip publishing, export or social routes.
                 raise PolicyFailure("operation_not_authorized")
@@ -162,8 +176,8 @@ def create_app(gateway):
             status, response = 401, {"error": "unauthorized"}
         except PolicyFailure as exc:
             reason = str(exc)
-            if reason == "idempotency_conflict":
-                status, response = 409, {"error": "idempotency_conflict"}
+            if reason in {"idempotency_conflict", "idempotency_closed"}:
+                status, response = 409, {"error": reason}
             elif reason == "tenant_queue_limit":
                 status, response = 429, {"error": "queue_limit"}
             elif reason == "operation_not_authorized":
