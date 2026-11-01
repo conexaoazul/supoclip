@@ -14,6 +14,7 @@ Source: `conexaoazul/supoclip` draft PR #1, branch
 | Prepare draft | `POST /v1/drafts` | Store tenant-scoped metadata only, never start video processing |
 | List own drafts | `GET /v1/drafts` | Enumerate only principal's tenant |
 | Read own draft | `GET /v1/drafts/{32 lowercase hex job_id}` | Return minimal status; alien tenant gets 404 |
+| Close metadata draft | `POST /v1/drafts/{32 lowercase hex job_id}/close` | Empty body; signed path; tenant-owned; state=closed; never cancel a SupoClip task |
 | Publish / export / delete / arbitrary paths | everything else | Explicit deny |
 
 `POST /v1/drafts` expects exactly the six JSON fields shown in the companion
@@ -58,6 +59,17 @@ signing. HTTP adapter rejects duplicate headers, encoded paths,
 query strings, unexpected content types, mismatched content lengths,
 oversized bodies (8192 bytes), non-HTTPS scope and forbidden verbs.
 
+Metadata drafts close on demand when 24 hours have elapsed since creation.
+Expiry is applied atomically on subsequent prepare, list or read requests;
+**there is no daemon or cron**, so expiration and deletion are not time-exact.
+Closed rows remain as idempotency tombstones for 30 days after closure,
+then are purged on a subsequent request. The same idempotency key on a closed
+row returns HTTP 409 `idempotency_closed`; callers must generate a new key.
+The signed close route returns `{job_id,state:closed,execution:DISABLED}`.
+No close operation stops, deletes, exports or publishes a SupoClip task.
+A real multi-process tenancy/retention solution needs approved storage and
+scheduled cleanup; do NOT use this SQLite prototype to promise SLA retention.
+
 Replay nonces are transactionally persisted in SQLite; same idempotency key
 and payload with a fresh signature yields the same job ID, a modified payload
 with the same idempotency key yields HTTP 409, and 3 pending drafts/tenant
@@ -65,7 +77,7 @@ yields HTTP 429.
 
 Known response codes: 201 created, 200 idempotent/read, 400 malformed
 transport, 401 bad signature/replay, 403 forbidden operation, 404 missing
-tenant-owned draft, 409 idempotency conflict, 413 too large, 422 policy
+tenant-owned draft, 409 idempotency conflict or previously closed key, 413 too large, 422 policy
 validation failed, 426 TLS required, 429 tenant queue cap, 503 unavailable.
 
 ## Deployment gate — NOT cleared
