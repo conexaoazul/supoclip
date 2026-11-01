@@ -96,9 +96,14 @@ Minimum controls before a live QA test:
 - Signed fields: `source_ref`, `rights_confirmed`, `consent_ref`,
   `clip_length`, `idempotency_key`, `source_duration_seconds`.
   Unknown fields (including `tenant_id`) are rejected.
-- HMAC header transport is NOT implemented. Future gateway HTTP adapter must
-  require TLS, private ingress, secure timestamps/nonces, per-key revocation,
-  uniform error handling, audited key rotation and no auth bypass.
+- A **non-deployed** ASGI HTTP adapter now exists in `gateway/http_asgi.py`.
+  It exposes signed `POST /v1/drafts`, `GET /v1/drafts`, and signed tenant-bound
+  `GET /v1/drafts/{job_id}`. It does not open sockets, handle TLS itself,
+  initialize services, or create a runnable global app. The code checks
+  `scope.scheme=https`, yet actual TLS/private ingress and trusted-proxy
+  attestation, secrets rotation, timeouts and deployment remain hard gates.
+- Adapter request/signature details, response mapping and remaining gates:
+  `gateway/QA_HTTP_RUNBOOK.md`.
 - Replay nonce claims and draft reservations use SQLite transactional uniqueness.
   A repeated **newly signed** identical intent returns the same prepared job ID;
   a reused nonce is denied, and an idempotency-key conflict is denied.
@@ -110,7 +115,7 @@ Minimum controls before a live QA test:
 - Spec and docs parity with the proprietary Odoo adapter are managed through
   https://github.com/conexaoazul/BlueApps19/pull/1403 .
 
-**Additional runtime gates not implemented:** HTTP/TLS layer, KMS/Vault,
+**Additional runtime gates not implemented:** HTTP listener and TLS termination, KMS/Vault,
 multiple worker processes/nonces DB tuning, per-client authorization including
 object access, verified media length, DNS-rebinding and redirect validation,
 egress firewall, DLP, cost caps, HMAC webhook signature verification,
