@@ -78,7 +78,7 @@ def ffprobe_fd(fd):
         raise EvidenceDenied("invalid_media_descriptor")
     path = "/proc/self/fd/" + str(fd)
     args = [
-        "ffprobe", "-v", "error", "-probesize", "1048576",
+        "ffprobe", "-v", "error", "-protocol_whitelist", "file", "-probesize", "1048576",
         "-analyzeduration", "3000000",
         "-show_entries",
         "format=duration,size,format_name:stream=codec_type,codec_name,width,height",
@@ -138,6 +138,17 @@ def _inspect_probe(probe, claimed_seconds):
     return duration, width, height, video["codec_name"]
 
 
+def _file_changed(before, after):
+    """Detect in-place edits as well as size or inode changes while probing."""
+    return (
+        before.st_size != after.st_size
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or before.st_mtime_ns != after.st_mtime_ns
+        or before.st_ctime_ns != after.st_ctime_ns
+    )
+
+
 def attest_private_upload(*, qa_root, verified_tenant, upload_ref,
                           claimed_duration_seconds, rights_record,
                           now, probe_fn: Callable = None):
@@ -185,7 +196,8 @@ def attest_private_upload(*, qa_root, verified_tenant, upload_ref,
             if size_read > MAX_SOURCE_BYTES:
                 raise EvidenceDenied("media_size_exceeded")
             hasher.update(block)
-        if size_read != file_info.st_size or os.fstat(mediafd).st_size != file_info.st_size:
+        if (size_read != file_info.st_size or
+                _file_changed(file_info, os.fstat(mediafd))):
             raise EvidenceDenied("media_changed_during_read")
         digest = hasher.hexdigest()
         if not rights_record.matches(
@@ -196,7 +208,7 @@ def attest_private_upload(*, qa_root, verified_tenant, upload_ref,
         probe = probe_fn(mediafd)
         duration, width, height, codec = _inspect_probe(
             probe, claimed_duration_seconds)
-        if os.fstat(mediafd).st_size != file_info.st_size:
+        if _file_changed(file_info, os.fstat(mediafd)):
             raise EvidenceDenied("media_changed_during_probe")
         return {
             "tenant_id": verified_tenant,
