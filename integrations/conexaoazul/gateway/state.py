@@ -18,6 +18,11 @@ class ClosedIntentError(ValueError):
     pass
 
 
+class EvidenceBindingError(ValueError):
+    """Metadata evidence mismatch; no execution authorization."""
+    pass
+
+
 # Metadata-only QA lifecycle. Expiry happens synchronously on a later request,
 # never via a background job or a SupoClip execution.
 DRAFT_TTL_SECONDS = 24 * 60 * 60
@@ -60,6 +65,19 @@ class GatewayState:
                 );
                 CREATE INDEX IF NOT EXISTS draft_tenant_idx
                     ON draft_jobs (tenant_id, state);
+                CREATE TABLE IF NOT EXISTS draft_evidence (
+                    job_id TEXT PRIMARY KEY
+                        REFERENCES draft_jobs(job_id) ON DELETE CASCADE,
+                    tenant_id TEXT NOT NULL,
+                    source_sha256 TEXT NOT NULL,
+                    rights_ref TEXT NOT NULL,
+                    duration_seconds REAL NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    approved_by TEXT NOT NULL,
+                    verified_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS draft_evidence_tenant_idx
+                    ON draft_evidence (tenant_id, verified_at);
             """)
 
     def close(self):
@@ -77,6 +95,12 @@ class GatewayState:
                SET state='closed', closed_at=expires_at, close_reason='expired'
                WHERE state='prepared' AND expires_at <= ?""",
             (now,),
+        )
+        # A closed metadata draft cannot reuse an earlier media attestation.
+        # A durable audit ledger is a separate future security gate.
+        self._db.execute(
+            """DELETE FROM draft_evidence
+               WHERE job_id IN (SELECT job_id FROM draft_jobs WHERE state='closed')"""
         )
         self._db.execute(
             """DELETE FROM draft_jobs
@@ -146,6 +170,96 @@ class GatewayState:
             except Exception:
                 self._db.execute("ROLLBACK")
                 raise
+
+    def bind_verified_upload(self, *, tenant_id, job_id, evidence, now):
+        """Persist verified media metadata under an active, tenant-owned draft.
+
+        Never called by HTTP: the gateway checks HMAC and TrustedUploadAttestor
+        before invoking this method. Storage alone cannot attest legality.
+        Atomic transaction prevents attaching evidence after close/expiry.
+        """
+        import re
+        if not isinstance(evidence, dict) or type(now) is not int:
+            raise EvidenceBindingError("invalid_evidence")
+        required = {
+            "tenant_id", "source_ref", "source_sha256", "size_bytes",
+            "duration_seconds", "rights_ref", "approved_by",
+            "execution", "evidence",
+        }
+        if set(evidence) != required:
+            raise EvidenceBindingError("invalid_evidence_fields")
+        digest = evidence["source_sha256"]
+        duration = evidence["duration_seconds"]
+        size = evidence["size_bytes"]
+        if (evidence["tenant_id"] != tenant_id or
+                evidence["execution"] != "DISABLED" or
+                evidence["evidence"] != "QA_LOCAL_ATTESTATION_ONLY" or
+                not isinstance(digest, str) or
+                re.fullmatch(r"[a-f0-9]{64}", digest) is None or
+                type(duration) is not float or
+                not 0 < duration <= 1800 or
+                type(size) is not int or not 12 <= size <= 1_000_000_000 or
+                not isinstance(evidence["approved_by"], str) or
+                not evidence["approved_by"]):
+            raise EvidenceBindingError("invalid_evidence")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._advance_lifecycle(now)
+                draft = self._db.execute(
+                    """SELECT source_ref, consent_ref, source_duration_seconds
+                       FROM draft_jobs WHERE tenant_id=? AND job_id=?
+                       AND state='prepared'""",
+                    (tenant_id, job_id),
+                ).fetchone()
+                if draft is None:
+                    raise EvidenceBindingError("draft_missing_closed_or_foreign")
+                if (not draft["source_ref"].startswith("upload:") or
+                        draft["source_ref"] != evidence["source_ref"] or
+                        draft["consent_ref"] != evidence["rights_ref"] or
+                        abs(duration - draft["source_duration_seconds"]) > 2):
+                    raise EvidenceBindingError("draft_evidence_mismatch")
+                existing = self._db.execute(
+                    """SELECT * FROM draft_evidence
+                       WHERE job_id=? AND tenant_id=?""",
+                    (job_id, tenant_id),
+                ).fetchone()
+                fingerprint = (
+                    digest, evidence["rights_ref"], duration, size,
+                    evidence["approved_by"],
+                )
+                if existing is not None:
+                    if tuple(existing[x] for x in (
+                            "source_sha256", "rights_ref", "duration_seconds",
+                            "size_bytes", "approved_by")) != fingerprint:
+                        raise EvidenceBindingError("conflicting_evidence")
+                    self._db.execute("COMMIT")
+                    return False
+                self._db.execute(
+                    """INSERT INTO draft_evidence
+                       (job_id,tenant_id,source_sha256,rights_ref,
+                        duration_seconds,size_bytes,approved_by,verified_at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (job_id, tenant_id, digest, evidence["rights_ref"],
+                     duration, size, evidence["approved_by"], now),
+                )
+                self._db.execute("COMMIT")
+                return True
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+
+    def get_verified_evidence(self, *, tenant_id, job_id, now):
+        """Return only attestation metadata of a still-prepared owned draft."""
+        return self._read_after_lifecycle(
+            now,
+            """SELECT e.job_id,e.source_sha256,e.rights_ref,e.duration_seconds,
+                      e.size_bytes,e.verified_at
+               FROM draft_evidence e JOIN draft_jobs d ON d.job_id=e.job_id
+               WHERE d.tenant_id=? AND d.job_id=? AND d.state='prepared'
+                     AND e.tenant_id=d.tenant_id""",
+            (tenant_id, job_id),
+        )
 
     def _read_after_lifecycle(self, now, sql, params, many=False):
         """Complete lazy expiry in one transaction, including read paths."""
