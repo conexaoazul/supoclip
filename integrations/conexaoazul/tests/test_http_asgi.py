@@ -204,6 +204,53 @@ class HTTPAdapterTest(unittest.TestCase):
         self.assertEqual(s, 201)
         self.assertEqual(d["execution"], "DISABLED")
 
+    def test_signed_close_releases_quota_via_http(self):
+        ids = []
+        for n in range(3):
+            status, receipt, _, _ = self.request(
+                body=payload(idempotency_key="close_" + str(n).zfill(9)))
+            self.assertEqual(status, 201)
+            ids.append(receipt["job_id"])
+        route = "/v1/drafts/" + ids[0] + "/close"
+        status, data, _, _ = self.request(method="POST", path=route, body=b"")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["state"], "closed")
+        self.assertEqual(data["execution"], "DISABLED")
+        status, receipt, _, _ = self.request(
+            body=payload(idempotency_key="close_999999999"))
+        self.assertEqual(status, 201)
+        self.assertEqual(receipt["state"], "prepared")
+
+    def test_foreign_tenant_close_is_not_found(self):
+        _, mine, _, _ = self.request(key_id="key-a")
+        route = "/v1/drafts/" + mine["job_id"] + "/close"
+        status, data, _, _ = self.request(method="POST", path=route,
+                                          body=b"", key_id="key-b")
+        self.assertEqual((status, data["error"]), (404, "not_found"))
+        status, read, _, _ = self.request(method="GET",
+                                         path="/v1/drafts/" + mine["job_id"],
+                                         key_id="key-a")
+        self.assertEqual((status, read["state"]), (200, "prepared"))
+
+    def test_closed_intent_returns_conflict_without_new_job(self):
+        _, mine, _, _ = self.request()
+        route = "/v1/drafts/" + mine["job_id"] + "/close"
+        self.request(method="POST", path=route, body=b"")
+        s, d, _, _ = self.request()
+        self.assertEqual((s, d["error"]), (409, "idempotency_closed"))
+
+    def test_close_rejects_body_and_path_signature_tampering(self):
+        _, mine, _, _ = self.request()
+        route = "/v1/drafts/" + mine["job_id"] + "/close"
+        s, d, _, _ = self.request(method="POST", path=route, body=b"{}")
+        self.assertEqual((s, d["error"]), (400, "invalid_request"))
+        s, d, _, _ = self.request(method="POST", path=route, body=b"",
+                                  path_in_sig="/v1/drafts")
+        self.assertEqual((s, d["error"]), (401, "unauthorized"))
+        s, read, _, _ = self.request(method="GET",
+                                    path="/v1/drafts/" + mine["job_id"])
+        self.assertEqual((s, read["state"]), (200, "prepared"))
+
     def test_unsupported_http_methods_denied(self):
         s, d, _, _ = self.request(method="DELETE", body=b"")
         self.assertEqual((s, d["error"]), (403, "forbidden"))
