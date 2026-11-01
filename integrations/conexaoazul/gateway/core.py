@@ -13,7 +13,10 @@ import re
 import time
 from urllib.parse import parse_qsl, urlsplit
 
-from .state import ClosedIntentError, DuplicateIntentError, GatewayState, QueueFullError
+from .evidence_binding import TrustedUploadAttestor
+from .media_evidence import EvidenceDenied
+from .state import (ClosedIntentError, DuplicateIntentError, EvidenceBindingError,
+                    GatewayState, QueueFullError)
 
 
 class AuthFailure(ValueError):
@@ -126,12 +129,16 @@ class BlueVideoGateway:
     A future HTTP adapter must call authenticate BEFORE choosing operation.
     """
 
-    def __init__(self, *, keys, state, clock=None):
+    def __init__(self, *, keys, state, clock=None, upload_attestor=None):
         self._keys = dict(keys)
         if not isinstance(state, GatewayState):
             raise TypeError("invalid_state")
+        if upload_attestor is not None and not isinstance(
+                upload_attestor, TrustedUploadAttestor):
+            raise TypeError("invalid_upload_attestor")
         self._state = state
         self._clock = clock or time.time
+        self._upload_attestor = upload_attestor
 
     def authenticate(self, *, key_id, signature, timestamp, nonce, method,
                      path, body):
@@ -221,6 +228,36 @@ class BlueVideoGateway:
             return None
         return {"job_id": draft["job_id"], "state": "closed",
                 "execution": "DISABLED"}
+
+    def attest_draft_offline(self, *, key_id, signature, timestamp, nonce, job_id):
+        """Bind private verified upload evidence to this caller's prepared draft.
+
+        Internal Python API ONLY. No ASGI route, network service, worker, render,
+        publish, export or submission. Rights records come from the injected
+        trusted server-side lookup, NEVER from caller JSON or headers.
+        """
+        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise PolicyFailure("invalid_job_id")
+        tenant_id = self.authenticate(
+            key_id=key_id, signature=signature, timestamp=timestamp, nonce=nonce,
+            method="POST", path="/internal/drafts/" + job_id + "/attest",
+            body=b"",
+        )
+        if self._upload_attestor is None:
+            raise PolicyFailure("trusted_media_attestor_not_configured")
+        now = int(self._clock())
+        try:
+            draft = self._state.get_for_tenant(tenant_id, job_id, now=now)
+            if not draft or draft["state"] != "prepared":
+                raise PolicyFailure("draft_missing_closed_or_foreign")
+            evidence = self._upload_attestor.attest(
+                tenant_id=tenant_id, draft=draft, now=now)
+            created = self._state.bind_verified_upload(
+                tenant_id=tenant_id, job_id=job_id, evidence=evidence, now=now)
+        except (EvidenceDenied, EvidenceBindingError) as exc:
+            raise PolicyFailure(str(exc)) from exc
+        return {"job_id": job_id, "evidence_status": "verified",
+                "created": created, "execution": "DISABLED"}
 
     @staticmethod
     def deny_unsafe_action(action):
