@@ -87,6 +87,24 @@ Minimum controls before a live QA test:
 - Marketing/editorial: permitted sources, PT-BR subtitles, human approval.
 - Product/Odoo: model/ACL review, QA fixed database, canonical asset handoff.
 
+## Draft lifecycle and comparative benchmark (offline)
+
+- Drafts hold one of three per-tenant slots while `prepared`; they now close
+  after 24 hours on the next gateway access or via tenant-owned signed
+  `POST /v1/drafts/{job_id}/close` with **empty** body.
+- Closure is only metadata. It cannot cancel, render, publish, delete or
+  export any SupoClip media task. Existing closed idempotency keys are denied
+  (409 `idempotency_closed`); clients must supply a new key for a new draft.
+- Closed metadata is retained as an idempotency tombstone for up to 30 days,
+  then purged **on a subsequent request**. This is not a background retention
+  guarantee, nor acceptable as a production-scale retention SLA.
+- All operations remain HMAC signed and scoped to a verified tenant.
+- Detailed protocol: `gateway/QA_HTTP_RUNBOOK.md`.
+- SupoClip vs AutoClip PT-BR comparison protocol: `BENCHMARK_PROTOCOL.md`.
+  It is not an executed benchmark; no real media or performance metrics exist.
+- **NO DEPLOY** until independent rights attestation, source probing,
+  multi-tenant media storage ACL, egress, cost and AGPL gates are passed.
+
 ## Offline gateway protocol (prototype only)
 
 - The only prepared action is `POST /v1/drafts`; its **raw JSON bytes** are
