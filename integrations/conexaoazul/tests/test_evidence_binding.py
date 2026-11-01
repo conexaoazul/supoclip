@@ -247,6 +247,78 @@ class EvidenceBindingTests(unittest.TestCase):
         with self.assertRaisesRegex(PolicyFailure, "uploaded_media_required"):
             self.attest(job)
 
+    def test_race_closing_draft_during_probe_cannot_bind(self):
+        job = self.prepare()
+
+        def closing_probe(fd):
+            auth = self.signed(
+                method="POST", path="/v1/drafts/" + job + "/close")
+            self.app.close_draft(job_id=job, **auth)
+            return fake_probe(fd)
+
+        self.app = BlueVideoGateway(
+            keys=KEYS, state=self.state, clock=lambda: NOW,
+            upload_attestor=TrustedUploadAttestor(
+                qa_root=self.root, rights_lookup=self.attestor._rights_lookup,
+                probe_fn=closing_probe),
+        )
+        with self.assertRaisesRegex(PolicyFailure, "draft_missing_closed_or_foreign"):
+            self.attest(job)
+        self.assertIsNone(self.state.get_verified_evidence(
+            tenant_id="tenant-a", job_id=job, now=NOW))
+
+    def test_existing_verified_record_cannot_be_replaced(self):
+        job = self.prepare()
+        self.attest(job)
+        changed_media = MEDIA.replace(b"fake", b"FAKE")
+        (self.root / "tenant-a" / "0123456789abcdef.mp4").write_bytes(changed_media)
+        self.approvals[("tenant-a", SOURCE)] = replace(
+            self.approvals[("tenant-a", SOURCE)],
+            source_sha256=hashlib.sha256(changed_media).hexdigest(),
+        )
+        with self.assertRaisesRegex(PolicyFailure, "conflicting_evidence"):
+            self.attest(job)
+        proof = self.state.get_verified_evidence(
+            tenant_id="tenant-a", job_id=job, now=NOW)
+        self.assertEqual(proof["source_sha256"], DIGEST)
+
+    def test_durable_binding_survives_sqlite_restart_without_becoming_execution(self):
+        job = self.prepare()
+        self.attest(job)
+        self.state.close()
+        self.state = GatewayState(str(self.root / "state.sqlite"))
+        restarted = self.state.get_verified_evidence(
+            tenant_id="tenant-a", job_id=job, now=NOW)
+        self.assertEqual(restarted["source_sha256"], DIGEST)
+        self.assertEqual(self.state.get_for_tenant(
+            "tenant-a", job, now=NOW)["state"], "prepared")
+        self.assertIsNone(self.state.get_verified_evidence(
+            tenant_id="tenant-b", job_id=job, now=NOW))
+
+    def test_trusted_rights_store_outage_fails_closed(self):
+        def unavailable(tenant, source):
+            raise RuntimeError("sensitive store detail")
+        self.app = BlueVideoGateway(
+            keys=KEYS, state=self.state, clock=lambda: NOW,
+            upload_attestor=TrustedUploadAttestor(
+                qa_root=self.root, rights_lookup=unavailable, probe_fn=fake_probe),
+        )
+        job = self.prepare()
+        with self.assertRaisesRegex(PolicyFailure, "rights_store_unavailable") as exc:
+            self.attest(job)
+        self.assertNotIn("sensitive store detail", str(exc.exception))
+        self.assertIsNone(self.state.get_verified_evidence(
+            tenant_id="tenant-a", job_id=job, now=NOW))
+
+    def test_even_verified_evidence_never_authorizes_network_execution(self):
+        job = self.prepare()
+        self.attest(job)
+        draft = self.state.get_for_tenant("tenant-a", job, now=NOW)
+        with self.assertRaisesRegex(PolicyFailure, "network_execution_not_implemented"):
+            self.app.prepare_upstream_task(draft, network_enabled=True)
+        self.assertEqual(self.state.get_for_tenant(
+            "tenant-a", job, now=NOW)["state"], "prepared")
+
     def test_attestation_api_has_no_public_asgi_route(self):
         from gateway.http_asgi import DRAFT_DETAIL, DRAFT_CLOSE
         path = "/internal/drafts/" + ("a" * 32) + "/attest"
