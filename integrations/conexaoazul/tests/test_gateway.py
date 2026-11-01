@@ -232,6 +232,103 @@ class GatewayTests(unittest.TestCase):
                 with self.assertRaises(PolicyFailure):
                     self.app.deny_unsafe_action(action)
 
+    def test_signed_close_releases_slot_without_touching_supoclip(self):
+        for n in range(3):
+            self.prepare(idempotency_key="limit_" + str(n).zfill(8))
+        target = self.state.list_for_tenant("tenant-a", now=NOW)[0]["job_id"]
+        auth = self.auth(body=b"", method="POST",
+                         path="/v1/drafts/" + target + "/close")
+        auth.pop("body")
+        closed = self.app.close_draft(**auth, job_id=target)
+        self.assertEqual(closed, {"job_id": target, "state": "closed",
+                                  "execution": "DISABLED"})
+        new = self.prepare(idempotency_key="limit_99999999")
+        self.assertEqual(new["state"], "prepared")
+        self.assertEqual(len([r for r in self.state.list_for_tenant(
+            "tenant-a", now=NOW) if r["state"] == "prepared"]), 3)
+
+    def test_foreign_tenant_cannot_close_and_must_get_404(self):
+        job = self.prepare()["job_id"]
+        auth = self.auth(key_id="key-b", body=b"", method="POST",
+                         path="/v1/drafts/" + job + "/close")
+        auth.pop("body")
+        self.assertIsNone(self.app.close_draft(**auth, job_id=job))
+        self.assertEqual(self.state.get_for_tenant(
+            "tenant-a", job, now=NOW)["state"], "prepared")
+
+    def test_close_signature_cannot_be_reused_or_retargeted(self):
+        job = self.prepare()["job_id"]
+        auth = self.auth(body=b"", method="POST",
+                         path="/v1/drafts/" + job + "/close")
+        auth.pop("body")
+        self.app.close_draft(**auth, job_id=job)
+        with self.assertRaises(AuthFailure):
+            self.app.close_draft(**auth, job_id=job)
+        another = self.prepare(idempotency_key="other_00000001")["job_id"]
+        fresh = self.auth(body=b"", method="POST",
+                          path="/v1/drafts/" + job + "/close")
+        fresh.pop("body")
+        with self.assertRaises(AuthFailure):
+            self.app.close_draft(**fresh, job_id=another)
+
+    def test_closed_idempotency_key_stays_closed(self):
+        job = self.prepare()["job_id"]
+        auth = self.auth(body=b"", method="POST",
+                         path="/v1/drafts/" + job + "/close")
+        auth.pop("body")
+        self.app.close_draft(**auth, job_id=job)
+        with self.assertRaisesRegex(PolicyFailure, "idempotency_closed"):
+            self.prepare()
+        self.assertEqual(self.state.get_for_tenant(
+            "tenant-a", job, now=NOW)["close_reason"], "closed_by_tenant")
+
+    def test_expiry_recovers_quota_without_cron(self):
+        for n in range(3):
+            self.prepare(idempotency_key="expire_" + str(n).zfill(8))
+        future = NOW + 24 * 60 * 60 + 1
+        from gateway.core import sign_request
+        data = make_payload(idempotency_key="expire_99999999")
+        nonce = "FutureNonce_1234567890"
+        signature = sign_request(KEYS["key-a"].secret, key_id="key-a",
+                                 timestamp=future, nonce=nonce,
+                                 method="POST", path="/v1/drafts", body=data)
+        self.app = BlueVideoGateway(
+            keys=KEYS, state=self.state, clock=lambda: future)
+        prepared = self.app.prepare(
+            key_id="key-a", signature=signature, timestamp=future,
+            nonce=nonce, body=data)
+        self.assertEqual(prepared["state"], "prepared")
+        rows = self.state.list_for_tenant("tenant-a", now=future)
+        self.assertEqual(len([r for r in rows if r["state"] == "prepared"]), 1)
+        self.assertEqual(len([r for r in rows if r["close_reason"] == "expired"]), 3)
+
+    def test_expired_key_rejects_replay_with_fresh_signature(self):
+        job = self.prepare()["job_id"]
+        future = NOW + 24 * 60 * 60 + 1
+        data = make_payload()
+        from gateway.core import sign_request
+        nonce = "ExpiredKey_123456789012"
+        signature = sign_request(KEYS["key-a"].secret, key_id="key-a",
+                                 timestamp=future, nonce=nonce,
+                                 method="POST", path="/v1/drafts", body=data)
+        self.app = BlueVideoGateway(
+            keys=KEYS, state=self.state, clock=lambda: future)
+        with self.assertRaisesRegex(PolicyFailure, "idempotency_closed"):
+            self.app.prepare(key_id="key-a", signature=signature,
+                             timestamp=future, nonce=nonce, body=data)
+        self.assertEqual(self.state.get_for_tenant(
+            "tenant-a", job, now=future)["state"], "closed")
+
+    def test_retention_purges_closed_rows_lazily_after_30_days(self):
+        job = self.prepare()["job_id"]
+        auth = self.auth(body=b"", method="POST",
+                         path="/v1/drafts/" + job + "/close")
+        auth.pop("body")
+        self.app.close_draft(**auth, job_id=job)
+        at = NOW + 30 * 24 * 60 * 60 + 1
+        self.assertIsNone(self.state.get_for_tenant("tenant-a", job, now=at))
+        self.assertEqual(self.state.list_for_tenant("tenant-a", now=at), [])
+
     def test_weak_key_rejected(self):
         with self.assertRaises(ValueError):
             VerificationKey("tenant-a", b"short")
