@@ -109,6 +109,7 @@ class GatewayState:
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
+                self._advance_lifecycle(now)
                 existing = self._db.execute(
                     "SELECT * FROM draft_jobs WHERE tenant_id=? AND idem_key=?",
                     (tenant_id, idem_key),
