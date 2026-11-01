@@ -188,6 +188,20 @@ class BlueVideoGateway:
         return [{"job_id": d["job_id"], "state": d["state"]}
                 for d in self._state.list_for_tenant(tenant_id)]
 
+    def get_draft(self, *, key_id, signature, timestamp, nonce, job_id):
+        """Read metadata of one tenant-owned draft with path-bound signature."""
+        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+            raise PolicyFailure("invalid_job_id")
+        tenant_id = self.authenticate(
+            key_id=key_id, signature=signature, timestamp=timestamp, nonce=nonce,
+            method="GET", path="/v1/drafts/" + job_id, body=b"",
+        )
+        draft = self._state.get_for_tenant(tenant_id, job_id)
+        if draft is None:
+            return None
+        return {"job_id": draft["job_id"], "state": draft["state"],
+                "execution": "DISABLED"}
+
     @staticmethod
     def deny_unsafe_action(action):
         raise PolicyFailure("operation_not_authorized")
