@@ -1,0 +1,35 @@
+name: Conexao Azul / SupoClip offline QA policy
+
+on:
+  pull_request:
+    paths:
+      - "integrations/conexaoazul/**"
+      - ".github/workflows/conexaoazul-qa-offline.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  offline-qa-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile standalone QA rule
+        run: python -m py_compile integrations/conexaoazul/qa_preflight.py integrations/conexaoazul/tests/test_qa_preflight.py
+      - name: Offline tests (no service calls)
+        run: python -m unittest discover -s integrations/conexaoazul/tests -v
+      - name: Confirm default evidence template fails closed
+        shell: bash
+        run: |
+          set -eu
+          if python integrations/conexaoazul/qa_preflight.py integrations/conexaoazul/qa-evidence-template.json; then
+            echo "ERROR: unverified template was accepted"
+            exit 1
+          fi
+          echo "Unverified template denied as expected"
