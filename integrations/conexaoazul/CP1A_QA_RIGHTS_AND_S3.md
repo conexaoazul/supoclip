@@ -87,3 +87,34 @@
   https://docs.aws.amazon.com/boto3/latest/reference/services/s3/client/get_object.html
 
 **Release decision: BLOCKED; use these modules exclusively for QA evidence.**
+
+
+## CP1a independent AWS tenant denial probe — added 2026-11-02
+
+- `gateway/qa_tenant_deny_probe.py`: `QAAwsCrossTenantHeadDeny`.
+  Requires an injected external session for **foreign-tenant QA IAM**,
+  exact expected STS assumed-role ARN and AWS account ID from trusted
+  configuration, strictly a different tenant from the object owner, a
+  tenant+SHA-pinned object key and a non-null object version.
+- Makes read-only `sts.get_caller_identity` and `s3.head_object`.
+  Only a structured AWS `AccessDenied` with HTTP 403 from that foreign
+  role returns `True`; `NoSuchKey`/404, network errors, invalid identity,
+  other 403 conditions and successful foreign HEAD fail closed.
+  Never reads object bodies or publishes a media URL.
+- It can be injected as the `tenant_deny_probe` of
+  `QAAWSObjectProof`; use **one restricted QA boto3.Session** for both
+  identity and S3 client. The proof is valid for one principal/key/version
+  at one moment only, not all policies or objects.
+- Unit tests `tests/test_qa_tenant_deny_probe.py` cover exact identity,
+  key, version, forbidden access, 404/other errors and incorrect 403.
+- **43 targeted offline tests PASS**, exit 0, running rights, S3 and
+  negative IAM contract suites together on `blueops-oci-worker-1`.
+  No AWS credentials were supplied or invoked. This does **not**
+  constitute a real cross-tenant access denial in a QA bucket.
+
+**Next proof required before promotion:** use a *dedicated* approved QA
+bucket, two independently restricted IAM identities, verified pinned
+object versions and a real HeadObject denial under the foreign principal.
+Audit IAM/bucket/object-lock and positive owner access. Do not reuse
+the production `consultas` storage bucket, invent permission settings,
+alter Object Lock retention or commit credentials to this public fork.
