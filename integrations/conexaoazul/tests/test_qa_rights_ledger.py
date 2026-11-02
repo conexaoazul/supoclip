@@ -13,7 +13,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gateway import BlueVideoGateway, GatewayState, VerificationKey
+from gateway import BlueVideoGateway, GatewayState, PolicyFailure, VerificationKey
 from gateway.core import sign_request
 from gateway.evidence_binding import TrustedUploadAttestor
 from gateway.media_evidence import RightsApproval
@@ -114,7 +114,7 @@ class RightsLedgerTests(unittest.TestCase):
                 replace(self.approval, valid_until=NOW + 40 * 86400),
                 replace(self.approval, processing_allowed=1),
                 replace(self.approval, source_ref="../data"),
-                replace(self.approval, approved_by="other-reviewer")):
+                replace(self.approval, approved_by="other-reviewer"),\n                replace(self.approval, approved_by=["untrusted-reviewer"])):
             with self.subTest(item=item), self.assertRaises(RightsLedgerDenied):
                 self.register(item)
 
@@ -240,7 +240,7 @@ class WorkerRevocationIntegrationTests(RightsLedgerTests):
 
     def test_signed_rights_are_required_and_revocation_blocks_worker(self):
         job = self.draft()
-        with self.assertRaises(Exception):
+        with self.assertRaises(PolicyFailure):
             self.app.attest_draft_offline(
                 job_id=job,
                 **self.auth("/internal/drafts/" + job + "/attest"),
