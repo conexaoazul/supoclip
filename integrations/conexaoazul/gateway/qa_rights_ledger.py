@@ -54,6 +54,8 @@ def _valid_approval(record, reviewer, now):
             or HASH_RE.fullmatch(record.source_sha256) is None
             or not isinstance(record.rights_ref, str)
             or REF_RE.fullmatch(record.rights_ref) is None
+            or not isinstance(record.approved_by, str)
+            or APPROVER_RE.fullmatch(record.approved_by) is None
             or record.approved_by != reviewer
             or type(record.approved_at) is not int
             or type(record.valid_until) is not int
