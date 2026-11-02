@@ -114,7 +114,8 @@ class RightsLedgerTests(unittest.TestCase):
                 replace(self.approval, valid_until=NOW + 40 * 86400),
                 replace(self.approval, processing_allowed=1),
                 replace(self.approval, source_ref="../data"),
-                replace(self.approval, approved_by="other-reviewer"),\n                replace(self.approval, approved_by=["untrusted-reviewer"])):
+                replace(self.approval, approved_by="other-reviewer"),
+                replace(self.approval, approved_by=["untrusted-reviewer"])):
             with self.subTest(item=item), self.assertRaises(RightsLedgerDenied):
                 self.register(item)
 
